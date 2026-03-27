@@ -1,0 +1,8 @@
+type: dbt_mesh_demo.components.dbt_mesh_component.DbtMeshComponent
+
+attributes:
+  project: "{{ context.project_root }}/dbt_projects/silver_project"
+  group_overrides:
+    seed: raw
+    staging: bronze
+    silver: silver

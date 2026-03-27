@@ -1,0 +1,6 @@
+version: 2
+
+groups:
+  - name: raw
+    owner:
+      name: data-engineering

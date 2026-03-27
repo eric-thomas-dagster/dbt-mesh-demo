@@ -1,0 +1,47 @@
+version: 2
+
+groups:
+  - name: silver
+    owner:
+      name: data-engineering
+
+models:
+  - name: customers
+    description: "Enriched customer data with order summary metrics"
+    access: public
+    config:
+      group: silver
+    columns:
+      - name: customer_id
+        description: "Primary key"
+        tests:
+          - unique
+          - not_null
+      - name: total_orders
+        description: "Count of orders placed"
+      - name: lifetime_spend
+        description: "Total amount spent across all orders"
+
+  - name: orders
+    description: "Enriched order data with customer name and line item count"
+    access: public
+    config:
+      group: silver
+    columns:
+      - name: order_id
+        description: "Primary key"
+        tests:
+          - unique
+          - not_null
+
+  - name: order_items
+    description: "Enriched order items with product details and line totals"
+    access: public
+    config:
+      group: silver
+    columns:
+      - name: order_item_id
+        description: "Primary key"
+        tests:
+          - unique
+          - not_null

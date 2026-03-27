@@ -1,0 +1,16 @@
+version: 2
+
+groups:
+  - name: bronze
+    owner:
+      name: data-engineering
+
+models:
+  - name: stg_customers
+    description: "Staged customer data from raw seed"
+  - name: stg_orders
+    description: "Staged order data from raw seed"
+  - name: stg_products
+    description: "Staged product data from raw seed"
+  - name: stg_order_items
+    description: "Staged order items from raw seed"

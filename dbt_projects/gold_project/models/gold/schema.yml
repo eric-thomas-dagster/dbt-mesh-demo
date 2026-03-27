@@ -1,0 +1,33 @@
+version: 2
+
+groups:
+  - name: gold
+    owner:
+      name: analytics-engineering
+
+models:
+  - name: customer_360
+    description: "Customer 360 view with tier segmentation and repeat customer flags"
+    columns:
+      - name: customer_id
+        description: "Primary key"
+        tests:
+          - unique
+          - not_null
+
+  - name: revenue_summary
+    description: "Monthly revenue aggregation with order and customer metrics"
+    columns:
+      - name: revenue_month
+        description: "Month of revenue"
+        tests:
+          - not_null
+
+  - name: product_performance
+    description: "Product-level analytics with sales volume and revenue metrics"
+    columns:
+      - name: product_id
+        description: "Primary key"
+        tests:
+          - unique
+          - not_null

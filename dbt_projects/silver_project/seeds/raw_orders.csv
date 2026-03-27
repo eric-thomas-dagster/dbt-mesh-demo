@@ -1,0 +1,11 @@
+order_id,customer_id,order_date,status,amount
+101,1,2024-06-01,completed,150.00
+102,2,2024-06-02,completed,230.50
+103,1,2024-06-05,completed,89.99
+104,3,2024-06-10,returned,320.00
+105,4,2024-06-15,completed,175.25
+106,5,2024-06-20,completed,445.00
+107,2,2024-07-01,completed,112.75
+108,3,2024-07-05,pending,267.50
+109,1,2024-07-10,completed,198.00
+110,4,2024-07-15,completed,55.99

@@ -1,0 +1,27 @@
+name: silver_project
+version: "1.0.0"
+config-version: 2
+
+profile: silver_project
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+seeds:
+  silver_project:
+    +group: raw
+
+models:
+  silver_project:
+    staging:
+      +materialized: view
+      +group: bronze
+    silver:
+      +materialized: table
+      +group: silver
+      +access: public
