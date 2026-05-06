@@ -5,8 +5,6 @@ attributes:
   auto_partition_microbatch: true
   enable_exposures: true
   enable_source_freshness_policies: true
-  translation_settings:
-    enable_source_metadata: true
   group_overrides:
     seed: raw
     staging: bronze
