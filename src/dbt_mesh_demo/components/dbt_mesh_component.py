@@ -104,6 +104,32 @@ class DbtMeshComponent(DbtProjectComponent):
         ),
     ] = False
 
+    enable_exposures: Annotated[
+        bool,
+        Resolver.default(
+            description=(
+                "Create non-materializable external assets for dbt exposures. "
+                "Exposures represent downstream consumers (dashboards, ML models, "
+                "APIs) that depend on dbt models. They appear in the Dagster asset "
+                "graph as leaf nodes, completing the lineage from sources through "
+                "models to consumers."
+            ),
+        ),
+    ] = False
+
+    enable_source_freshness_policies: Annotated[
+        bool,
+        Resolver.default(
+            description=(
+                "Apply Dagster FreshnessPolicy to source assets based on dbt's "
+                "source freshness config (warn_after/error_after). Dagster passively "
+                "evaluates freshness — no dbt execution needed. Requires an upstream "
+                "sensor (Fivetran, Airbyte, or custom) to emit AssetObservation "
+                "events so Dagster knows when sources were last updated."
+            ),
+        ),
+    ] = False
+
     def get_cli_args(self, context: dg.AssetExecutionContext) -> list[str]:
         """Override to inject --event-time-start/end for microbatch partitions.
 
@@ -147,7 +173,12 @@ class DbtMeshComponent(DbtProjectComponent):
     ) -> dg.Definitions:
         base_defs = super().build_defs_from_state(context, state_path)
 
-        if not self.external_packages:
+        needs_manifest = (
+            self.external_packages
+            or self.enable_exposures
+            or self.enable_source_freshness_policies
+        )
+        if not needs_manifest:
             return base_defs
 
         # Get the resolved project and its manifest
@@ -158,11 +189,25 @@ class DbtMeshComponent(DbtProjectComponent):
             return base_defs
 
         manifest = json.loads(manifest_path.read_text())
-        external_assets = self._create_external_assets(manifest)
 
-        if external_assets:
+        additional_assets: list[dg.AssetSpec] = []
+
+        # External assets for mesh packages
+        if self.external_packages:
+            additional_assets.extend(self._create_external_assets(manifest))
+
+        # Exposure assets (downstream consumers)
+        if self.enable_exposures:
+            additional_assets.extend(self._create_exposure_assets(manifest))
+
+        # Source freshness policies
+        updated_assets = list(base_defs.assets or [])
+        if self.enable_source_freshness_policies:
+            updated_assets = self._apply_source_freshness_policies(updated_assets, manifest)
+
+        if additional_assets or self.enable_source_freshness_policies:
             return dg.Definitions(
-                assets=[*base_defs.assets, *external_assets],
+                assets=[*updated_assets, *additional_assets],
                 resources=base_defs.resources,
                 schedules=base_defs.schedules,
                 sensors=base_defs.sensors,
@@ -211,5 +256,111 @@ class DbtMeshComponent(DbtProjectComponent):
             )
 
         return external_specs
+
+    def _create_exposure_assets(
+        self, manifest: Mapping[str, Any]
+    ) -> list[dg.AssetSpec]:
+        """Create non-materializable assets for dbt exposures.
+
+        Exposures represent downstream consumers (dashboards, ML models, APIs).
+        They appear as leaf nodes in the asset graph with deps pointing to the
+        dbt models they consume.
+        """
+        exposure_specs: list[dg.AssetSpec] = []
+
+        for exposure_id, exposure_info in manifest.get("exposures", {}).items():
+            name = exposure_info.get("name", "")
+            exposure_type = exposure_info.get("type", "dashboard")
+
+            # Build deps from the exposure's depends_on
+            deps: list[dg.AssetDep] = []
+            for dep_id in exposure_info.get("depends_on", {}).get("nodes", []):
+                node = manifest.get("nodes", {}).get(dep_id)
+                if node:
+                    asset_key = self.translator.get_asset_key(node)
+                    deps.append(dg.AssetDep(asset=asset_key))
+
+            if not deps:
+                continue
+
+            asset_key = dg.AssetKey(["exposure", name])
+
+            metadata: dict[str, Any] = {
+                "dbt/exposure_type": exposure_type,
+                "dbt/owner": exposure_info.get("owner", {}).get("name", ""),
+            }
+            url = exposure_info.get("url")
+            if url:
+                metadata["url"] = dg.MetadataValue.url(url)
+
+            exposure_specs.append(
+                dg.AssetSpec(
+                    key=asset_key,
+                    deps=deps,
+                    group_name="exposures",
+                    description=exposure_info.get(
+                        "description", f"dbt {exposure_type}: {name}"
+                    ),
+                    metadata=metadata,
+                    kinds={exposure_type},
+                )
+            )
+
+        return exposure_specs
+
+    def _apply_source_freshness_policies(
+        self,
+        assets: list[Any],
+        manifest: Mapping[str, Any],
+    ) -> list[Any]:
+        """Apply FreshnessPolicy to source assets based on dbt freshness config.
+
+        Reads warn_after/error_after from dbt source definitions and converts
+        them to Dagster FreshnessPolicy(maximum_lag_minutes=...). Dagster
+        passively evaluates these — no dbt execution needed.
+        """
+        # Build lookup: source asset key → freshness minutes
+        freshness_by_source: dict[str, int] = {}
+        for source_id, source_info in manifest.get("sources", {}).items():
+            freshness = source_info.get("freshness", {})
+            if not freshness:
+                continue
+
+            # Use warn_after as the policy (more conservative than error_after)
+            warn_after = freshness.get("warn_after")
+            error_after = freshness.get("error_after")
+
+            threshold = warn_after or error_after
+            if not threshold:
+                continue
+
+            count = threshold.get("count", 0)
+            period = threshold.get("period", "hour")
+            if period == "minute":
+                minutes = count
+            elif period == "hour":
+                minutes = count * 60
+            elif period == "day":
+                minutes = count * 60 * 24
+            else:
+                continue
+
+            asset_key = self.translator.get_asset_key(source_info)
+            freshness_by_source[str(asset_key)] = minutes
+
+        if not freshness_by_source:
+            return assets
+
+        # Apply policies to matching assets
+        updated: list[Any] = []
+        for asset in assets:
+            if isinstance(asset, dg.AssetSpec) and str(asset.key) in freshness_by_source:
+                minutes = freshness_by_source[str(asset.key)]
+                asset = asset.replace_attributes(
+                    freshness_policy=dg.FreshnessPolicy(maximum_lag_minutes=minutes),
+                )
+            updated.append(asset)
+
+        return updated
 
     # Group resolution and partition definitions are handled by _MeshTranslator

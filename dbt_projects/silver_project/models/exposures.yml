@@ -1,0 +1,22 @@
+version: 2
+
+exposures:
+  - name: customer_dashboard
+    type: dashboard
+    description: "Executive customer overview dashboard"
+    url: https://looker.company.com/dashboards/customer_overview
+    owner:
+      name: analytics-team
+      email: analytics@company.com
+    depends_on:
+      - ref('customers')
+      - ref('orders')
+
+  - name: revenue_report
+    type: analysis
+    description: "Monthly revenue analysis report"
+    owner:
+      name: finance-team
+    depends_on:
+      - ref('orders')
+      - ref('order_items')

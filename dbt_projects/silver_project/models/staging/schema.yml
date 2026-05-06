@@ -5,6 +5,19 @@ groups:
     owner:
       name: data-engineering
 
+sources:
+  - name: raw_data
+    description: "Raw data sources"
+    freshness:
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 24, period: hour}
+    tables:
+      - name: raw_customers
+      - name: raw_orders
+        freshness:
+          warn_after: {count: 6, period: hour}
+          error_after: {count: 12, period: hour}
+
 models:
   - name: stg_customers
     description: "Staged customer data from raw seed"
