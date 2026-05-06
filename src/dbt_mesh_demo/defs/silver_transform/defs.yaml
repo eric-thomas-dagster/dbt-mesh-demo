@@ -5,8 +5,10 @@ attributes:
   auto_partition_microbatch: true
   cli_args:
     - build
-    - "--vars":
-        min_date: "{{ partition_key }}"
+    - --event-time-start
+    - "{{ partition_key }}"
+    - --event-time-end
+    - "{{ partition_time_window.end.strftime('%Y-%m-%d') }}"
   group_overrides:
     seed: raw
     staging: bronze
