@@ -45,3 +45,25 @@ models:
         tests:
           - unique
           - not_null
+
+  - name: orders_daily
+    description: "Daily partitioned orders (microbatch)"
+    access: public
+    config:
+      group: silver
+
+unit_tests:
+  - name: test_customer_lifetime_spend
+    description: "Verify lifetime spend calculation"
+    model: customers
+    given:
+      - input: ref('stg_orders')
+        rows:
+          - {order_id: 1, customer_id: 1, order_date: '2024-06-01', status: 'completed', amount: 100.00}
+          - {order_id: 2, customer_id: 1, order_date: '2024-06-02', status: 'completed', amount: 50.00}
+      - input: ref('stg_customers')
+        rows:
+          - {customer_id: 1, first_name: 'Alice', last_name: 'Smith', email: 'alice@test.com', created_at: '2024-01-01'}
+    expect:
+      rows:
+        - {customer_id: 1, first_name: 'Alice', last_name: 'Smith', total_orders: 2, lifetime_spend: 150.00}
