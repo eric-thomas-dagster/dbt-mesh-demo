@@ -8,12 +8,59 @@ can track lineage across project boundaries without duplicating assets.
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import dagster as dg
 from dagster.components.resolved.model import Resolver
-from dagster_dbt import DbtProject, DbtProjectComponent
+from dagster_dbt import DagsterDbtTranslator, DbtProject, DbtProjectComponent
+
+
+class _MeshTranslator(DagsterDbtTranslator):
+    """Translator that supports group overrides and auto-partitioning of microbatch models."""
+
+    def __init__(
+        self,
+        group_overrides: dict[str, str] | None = None,
+        auto_partition_microbatch: bool = False,
+        microbatch_start_date: str = "2024-01-01",
+        settings: Any | None = None,
+    ):
+        super().__init__(settings=settings)
+        self._group_overrides = group_overrides or {}
+        self._auto_partition_microbatch = auto_partition_microbatch
+        self._microbatch_start_date = microbatch_start_date
+
+    def get_group_name(self, dbt_resource_props: Mapping[str, Any]) -> str | None:
+        if self._group_overrides:
+            resource_type = dbt_resource_props.get("resource_type", "")
+            if resource_type in self._group_overrides:
+                return self._group_overrides[resource_type]
+            for segment in dbt_resource_props.get("fqn", []):
+                if segment in self._group_overrides:
+                    return self._group_overrides[segment]
+        return super().get_group_name(dbt_resource_props)
+
+    def get_partitions_def(
+        self, dbt_resource_props: Mapping[str, Any]
+    ) -> dg.PartitionsDefinition | None:
+        if not self._auto_partition_microbatch:
+            return None
+        config = dbt_resource_props.get("config", {})
+        if config.get("incremental_strategy") == "microbatch":
+            batch_size = config.get("batch_size", "day")
+            begin = config.get("begin", self._microbatch_start_date)
+            # dbt may append T00:00:00 — strip to date only
+            if isinstance(begin, str) and "T" in begin:
+                begin = begin.split("T")[0]
+            if batch_size == "day":
+                return dg.DailyPartitionsDefinition(start_date=begin)
+            elif batch_size == "month":
+                return dg.MonthlyPartitionsDefinition(start_date=begin)
+            elif batch_size == "hour":
+                return dg.HourlyPartitionsDefinition(start_date=begin)
+        return None
 
 
 @dataclass
@@ -43,6 +90,32 @@ class DbtMeshComponent(DbtProjectComponent):
             ),
         ),
     ] = field(default_factory=dict)
+
+    auto_partition_microbatch: Annotated[
+        bool,
+        Resolver.default(
+            description=(
+                "Automatically create Dagster partition definitions for dbt models "
+                "using the microbatch incremental strategy. Maps batch_size to "
+                "DailyPartitionsDefinition (day), MonthlyPartitionsDefinition (month), "
+                "or HourlyPartitionsDefinition (hour). Uses the model's 'begin' config "
+                "as the partition start date."
+            ),
+        ),
+    ] = False
+
+    @cached_property
+    def translator(self) -> DagsterDbtTranslator:
+        from dataclasses import replace
+
+        settings = replace(self.translation_settings, enable_code_references=False)
+        if self.group_overrides or self.auto_partition_microbatch:
+            return _MeshTranslator(
+                group_overrides=self.group_overrides,
+                auto_partition_microbatch=self.auto_partition_microbatch,
+                settings=settings,
+            )
+        return DagsterDbtTranslator(settings)
 
     def build_defs_from_state(
         self, context: dg.ComponentLoadContext, state_path: Path | None
@@ -114,35 +187,4 @@ class DbtMeshComponent(DbtProjectComponent):
 
         return external_specs
 
-    def _resolve_group(self, node_info: Mapping[str, Any]) -> str | None:
-        """Resolve group name from overrides, falling back to dbt group."""
-        if not self.group_overrides:
-            return None
-
-        # Check resource_type first (e.g. "seed", "model", "test")
-        resource_type = node_info.get("resource_type", "")
-        if resource_type in self.group_overrides:
-            return self.group_overrides[resource_type]
-
-        # Then check each fqn segment (e.g. ["silver_project", "staging", "stg_customers"])
-        for segment in node_info.get("fqn", []):
-            if segment in self.group_overrides:
-                return self.group_overrides[segment]
-
-        return None
-
-    def get_asset_spec(
-        self,
-        manifest: Mapping[str, Any],
-        unique_id: str,
-        project: Optional[DbtProject],
-    ) -> dg.AssetSpec:
-        base_spec = super().get_asset_spec(manifest, unique_id, project)
-
-        node_info = self.get_resource_props(manifest, unique_id)
-        group_override = self._resolve_group(node_info)
-
-        if group_override:
-            return base_spec.replace_attributes(group_name=group_override)
-
-        return base_spec
+    # Group resolution and partition definitions are handled by _MeshTranslator
