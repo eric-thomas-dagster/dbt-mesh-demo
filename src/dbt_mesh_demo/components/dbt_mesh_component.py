@@ -117,6 +117,13 @@ class DbtMeshComponent(DbtProjectComponent):
         ),
     ] = False
 
+    exposure_group: Annotated[
+        str,
+        Resolver.default(
+            description="Dagster group name for exposure assets. Default 'exposures'.",
+        ),
+    ] = "exposures"
+
     enable_source_freshness_policies: Annotated[
         bool,
         Resolver.default(
@@ -297,7 +304,7 @@ class DbtMeshComponent(DbtProjectComponent):
                 dg.AssetSpec(
                     key=asset_key,
                     deps=deps,
-                    group_name="exposures",
+                    group_name=self.exposure_group,
                     description=exposure_info.get(
                         "description", f"dbt {exposure_type}: {name}"
                     ),
