@@ -358,14 +358,21 @@ class DbtMeshComponent(DbtProjectComponent):
         if not freshness_by_source:
             return assets
 
-        # Apply policies to matching assets
-        updated: list[Any] = []
-        for asset in assets:
-            if isinstance(asset, dg.AssetSpec) and str(asset.key) in freshness_by_source:
-                minutes = freshness_by_source[str(asset.key)]
-                asset = asset.replace_attributes(
+        def _apply_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
+            minutes = freshness_by_source.get(str(spec.key))
+            if minutes:
+                return spec.replace_attributes(
                     freshness_policy=dg.FreshnessPolicy(maximum_lag_minutes=minutes),
                 )
+            return spec
+
+        # Apply policies to both standalone AssetSpecs and specs inside AssetsDefinitions
+        updated: list[Any] = []
+        for asset in assets:
+            if isinstance(asset, dg.AssetSpec):
+                asset = _apply_freshness(asset)
+            elif isinstance(asset, dg.AssetsDefinition):
+                asset = asset.map_asset_specs(_apply_freshness)
             updated.append(asset)
 
         return updated
