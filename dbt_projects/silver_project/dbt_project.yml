@@ -22,7 +22,15 @@ models:
     staging:
       +materialized: view
       +group: bronze
+      +meta:
+        dagster:
+          freshness:
+            warn_after: {count: 12, period: hour}
     silver:
       +materialized: table
       +group: silver
       +access: public
+      +meta:
+        dagster:
+          freshness:
+            warn_after: {count: 6, period: hour}

@@ -124,15 +124,14 @@ class DbtMeshComponent(DbtProjectComponent):
         ),
     ] = "exposures"
 
-    enable_source_freshness_policies: Annotated[
+    enable_freshness_policies: Annotated[
         bool,
         Resolver.default(
             description=(
-                "Apply Dagster FreshnessPolicy to source assets based on dbt's "
-                "source freshness config (warn_after/error_after). Dagster passively "
-                "evaluates freshness — no dbt execution needed. Requires an upstream "
-                "sensor (Fivetran, Airbyte, or custom) to emit AssetObservation "
-                "events so Dagster knows when sources were last updated."
+                "Apply Dagster FreshnessPolicy to assets based on dbt freshness "
+                "config. Reads warn_after/error_after from source freshness and "
+                "model-level freshness (dbt 1.10+). Define freshness in "
+                "dbt_project.yml or schema.yml — Dagster reads it automatically."
             ),
         ),
     ] = False
@@ -183,7 +182,7 @@ class DbtMeshComponent(DbtProjectComponent):
         needs_manifest = (
             self.external_packages
             or self.enable_exposures
-            or self.enable_source_freshness_policies
+            or self.enable_freshness_policies
         )
         if not needs_manifest:
             return base_defs
@@ -207,15 +206,12 @@ class DbtMeshComponent(DbtProjectComponent):
         if self.enable_exposures:
             additional_assets.extend(self._create_exposure_assets(manifest))
 
-        # Source/model freshness policies
+        # Freshness policies from dbt config
         updated_assets = list(base_defs.assets or [])
-        if self.enable_source_freshness_policies:
-            updated_assets, freshness_source_assets = self._create_freshness_assets_and_apply_model_freshness(
-                updated_assets, manifest
-            )
-            additional_assets.extend(freshness_source_assets)
+        if self.enable_freshness_policies:
+            updated_assets = self._apply_freshness_policies(updated_assets, manifest)
 
-        if additional_assets or self.enable_source_freshness_policies:
+        if additional_assets or self.enable_freshness_policies:
             return dg.Definitions(
                 assets=[*updated_assets, *additional_assets],
                 resources=base_defs.resources,
@@ -318,24 +314,22 @@ class DbtMeshComponent(DbtProjectComponent):
 
         return exposure_specs
 
-    def _create_freshness_assets_and_apply_model_freshness(
+    def _apply_freshness_policies(
         self,
         assets: list[Any],
         manifest: Mapping[str, Any],
-    ) -> tuple[list[Any], list[dg.AssetSpec]]:
-        """Create source assets with FreshnessPolicy and apply model-level freshness.
+    ) -> list[Any]:
+        """Apply FreshnessPolicy to assets based on dbt freshness config.
 
-        Sources: Creates explicit AssetSpec objects for dbt sources that have
-        freshness config, with keys matching the dep keys in the asset graph.
+        Reads freshness from:
+        - Model config.freshness (dbt 1.10+, set in dbt_project.yml or schema.yml)
+        - Source freshness (warn_after/error_after)
 
-        Models (dbt 1.10+): Applies FreshnessPolicy directly to model assets
-        that have config.freshness defined.
-
-        No inheritance — each asset gets freshness only from its own dbt config.
+        Each asset gets freshness only from its own dbt config. No inheritance.
         """
         from datetime import timedelta
 
-        def _freshness_minutes(freshness_config: Mapping[str, Any]) -> int | None:
+        def _to_minutes(freshness_config: Mapping[str, Any]) -> int | None:
             warn_after = freshness_config.get("warn_after")
             error_after = freshness_config.get("error_after")
             threshold = warn_after or error_after
@@ -351,96 +345,54 @@ class DbtMeshComponent(DbtProjectComponent):
                 return count * 60 * 24
             return None
 
-        # Build source freshness lookup by table name
-        source_freshness: dict[str, int] = {}
+        # Build lookup: asset key → freshness minutes
+        freshness_by_key: dict[str, int] = {}
+
+        # Model freshness from config.meta.dagster.freshness (works on all dbt versions)
+        # OR config.freshness (dbt Cloud Enterprise / dbt 1.10+)
+        for node_id, node_info in manifest.get("nodes", {}).items():
+            # Try meta.dagster.freshness first (works everywhere)
+            freshness = (
+                node_info.get("config", {}).get("meta", {}).get("dagster", {}).get("freshness")
+                or node_info.get("config", {}).get("freshness")
+                or {}
+            )
+            if not freshness:
+                continue
+            minutes = _to_minutes(freshness)
+            if minutes:
+                asset_key = self.translator.get_asset_key(node_info)
+                freshness_by_key[str(asset_key)] = minutes
+
+        # Source freshness
         for source_id, source_info in manifest.get("sources", {}).items():
             freshness = source_info.get("freshness", {})
-            minutes = _freshness_minutes(freshness)
+            minutes = _to_minutes(freshness)
             if minutes:
-                table_name = source_info.get("identifier") or source_info.get("name", "")
-                source_freshness[table_name] = minutes
+                asset_key = self.translator.get_asset_key(source_info)
+                freshness_by_key[str(asset_key)] = minutes
 
-        # Collect existing asset keys to avoid creating duplicate source assets
-        existing_keys: set[str] = set()
-        for asset in assets:
-            if isinstance(asset, dg.AssetsDefinition):
-                for spec in asset.specs:
-                    existing_keys.add(str(spec.key))
-            elif isinstance(asset, dg.AssetSpec):
-                existing_keys.add(str(asset.key))
+        if not freshness_by_key:
+            return assets
 
-        # Apply source freshness to existing assets.
-        # Match by: direct key name (for seeds) OR by dep key name (for models
-        # that depend on sources). Uses the tightest freshness from deps.
-        def _apply_source_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
-            # Direct match by asset name
-            last = spec.key.path[-1] if spec.key.path else ""
-            minutes = source_freshness.get(last)
+        def _apply(spec: dg.AssetSpec) -> dg.AssetSpec:
+            minutes = freshness_by_key.get(str(spec.key))
             if minutes:
                 return spec.replace_attributes(
                     freshness_policy=dg.FreshnessPolicy.time_window(
                         fail_window=timedelta(minutes=minutes),
                     ),
                 )
-            # Match by dep — if this model depends on a source with freshness
-            dep_minutes: list[int] = []
-            for dep in spec.deps:
-                dep_last = dep.asset_key.path[-1] if dep.asset_key.path else ""
-                m = source_freshness.get(dep_last)
-                if m:
-                    dep_minutes.append(m)
-            if dep_minutes:
-                return spec.replace_attributes(
-                    freshness_policy=dg.FreshnessPolicy.time_window(
-                        fail_window=timedelta(minutes=min(dep_minutes)),
-                    ),
-                )
             return spec
 
-        updated_assets: list[Any] = []
+        updated: list[Any] = []
         for asset in assets:
             if isinstance(asset, dg.AssetsDefinition):
-                asset = asset.map_asset_specs(_apply_source_freshness)
+                asset = asset.map_asset_specs(_apply)
             elif isinstance(asset, dg.AssetSpec):
-                asset = _apply_source_freshness(asset)
-            updated_assets.append(asset)
-        assets = updated_assets
+                asset = _apply(asset)
+            updated.append(asset)
 
-        # No standalone source assets — freshness is applied to existing
-        # seed/model assets above via map_asset_specs
-        source_assets: list[dg.AssetSpec] = []
-
-        # Apply model-level freshness (dbt 1.10+) — no inheritance
-        model_freshness: dict[str, int] = {}
-        for node_id, node_info in manifest.get("nodes", {}).items():
-            freshness = node_info.get("config", {}).get("freshness") or {}
-            if not freshness:
-                continue
-            minutes = _freshness_minutes(freshness)
-            if minutes:
-                asset_key = self.translator.get_asset_key(node_info)
-                model_freshness[str(asset_key)] = minutes
-
-        if model_freshness:
-            def _apply_model_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
-                minutes = model_freshness.get(str(spec.key))
-                if minutes:
-                    return spec.replace_attributes(
-                        freshness_policy=dg.FreshnessPolicy.time_window(
-                            fail_window=timedelta(minutes=minutes),
-                        ),
-                    )
-                return spec
-
-            updated: list[Any] = []
-            for asset in assets:
-                if isinstance(asset, dg.AssetSpec):
-                    asset = _apply_model_freshness(asset)
-                elif isinstance(asset, dg.AssetsDefinition):
-                    asset = asset.map_asset_specs(_apply_model_freshness)
-                updated.append(asset)
-            assets = updated
-
-        return assets, source_assets
+        return updated
 
     # Group resolution and partition definitions are handled by _MeshTranslator

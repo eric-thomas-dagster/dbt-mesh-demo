@@ -4,7 +4,7 @@ attributes:
   project: "{{ context.project_root }}/dbt_projects/silver_project"
   auto_partition_microbatch: true
   enable_exposures: true
-  enable_source_freshness_policies: true
+  enable_freshness_policies: true
   exclude: "resource_type:seed"
   group_overrides:
     staging: bronze
