@@ -369,14 +369,30 @@ class DbtMeshComponent(DbtProjectComponent):
             elif isinstance(asset, dg.AssetSpec):
                 existing_keys.add(str(asset.key))
 
-        # Apply source freshness to existing assets (seeds/sources already in the graph)
+        # Apply source freshness to existing assets.
+        # Match by: direct key name (for seeds) OR by dep key name (for models
+        # that depend on sources). Uses the tightest freshness from deps.
         def _apply_source_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
+            # Direct match by asset name
             last = spec.key.path[-1] if spec.key.path else ""
             minutes = source_freshness.get(last)
             if minutes:
                 return spec.replace_attributes(
                     freshness_policy=dg.FreshnessPolicy.time_window(
                         fail_window=timedelta(minutes=minutes),
+                    ),
+                )
+            # Match by dep — if this model depends on a source with freshness
+            dep_minutes: list[int] = []
+            for dep in spec.deps:
+                dep_last = dep.asset_key.path[-1] if dep.asset_key.path else ""
+                m = source_freshness.get(dep_last)
+                if m:
+                    dep_minutes.append(m)
+            if dep_minutes:
+                return spec.replace_attributes(
+                    freshness_policy=dg.FreshnessPolicy.time_window(
+                        fail_window=timedelta(minutes=min(dep_minutes)),
                     ),
                 )
             return spec
