@@ -3,12 +3,6 @@ type: dbt_mesh_demo.components.dbt_mesh_component.DbtMeshComponent
 attributes:
   project: "{{ context.project_root }}/dbt_projects/silver_project"
   auto_partition_microbatch: true
-  cli_args:
-    - build
-    - --event-time-start
-    - "{{ partition_key }}"
-    - --event-time-end
-    - "{{ partition_time_window.end.strftime('%Y-%m-%d') }}"
   group_overrides:
     seed: raw
     staging: bronze

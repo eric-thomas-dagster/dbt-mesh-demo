@@ -104,6 +104,31 @@ class DbtMeshComponent(DbtProjectComponent):
         ),
     ] = False
 
+    def get_cli_args(self, context: dg.AssetExecutionContext) -> list[str]:
+        """Override to inject --event-time-start/end for microbatch partitions.
+
+        When auto_partition_microbatch is enabled and the run has a partition key,
+        automatically adds --event-time-start and --event-time-end to the dbt
+        command so microbatch only processes the selected partition's batch window.
+        """
+        args = super().get_cli_args(context)
+
+        if self.auto_partition_microbatch and context.has_partition_key:
+            partition_key = context.partition_key
+            # Compute end date from the partition time window
+            if hasattr(context, "partition_time_window") and context.partition_time_window:
+                end_date = context.partition_time_window.end.strftime("%Y-%m-%d")
+            else:
+                # Fallback: assume daily partition, add one day
+                from datetime import datetime, timedelta
+
+                start = datetime.strptime(partition_key, "%Y-%m-%d")
+                end_date = (start + timedelta(days=1)).strftime("%Y-%m-%d")
+
+            args.extend(["--event-time-start", partition_key, "--event-time-end", end_date])
+
+        return args
+
     @cached_property
     def translator(self) -> DagsterDbtTranslator:
         from dataclasses import replace
