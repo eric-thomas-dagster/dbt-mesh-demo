@@ -4,4 +4,4 @@ select
     order_id,
     product_id,
     quantity
-from {{ ref('raw_order_items') }}
+from {{ source('raw_data', 'raw_order_items') }}

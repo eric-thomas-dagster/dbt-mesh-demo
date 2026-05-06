@@ -207,12 +207,12 @@ class DbtMeshComponent(DbtProjectComponent):
         if self.enable_exposures:
             additional_assets.extend(self._create_exposure_assets(manifest))
 
-        # Source freshness policies
+        # Source freshness policies — create explicit source assets with FreshnessPolicy
         updated_assets = list(base_defs.assets or [])
         if self.enable_source_freshness_policies:
-            updated_assets = self._apply_source_freshness_policies(updated_assets, manifest)
+            additional_assets.extend(self._create_source_freshness_assets(manifest))
 
-        if additional_assets or self.enable_source_freshness_policies:
+        if additional_assets:
             return dg.Definitions(
                 assets=[*updated_assets, *additional_assets],
                 resources=base_defs.resources,
@@ -315,28 +315,24 @@ class DbtMeshComponent(DbtProjectComponent):
 
         return exposure_specs
 
-    def _apply_source_freshness_policies(
-        self,
-        assets: list[Any],
-        manifest: Mapping[str, Any],
-    ) -> list[Any]:
-        """Apply FreshnessPolicy to source assets based on dbt freshness config.
+    def _create_source_freshness_assets(
+        self, manifest: Mapping[str, Any]
+    ) -> list[dg.AssetSpec]:
+        """Create explicit source assets with FreshnessPolicy from dbt freshness config.
 
-        Reads warn_after/error_after from dbt source definitions and converts
-        them to Dagster FreshnessPolicy(maximum_lag_minutes=...). Dagster
-        passively evaluates these — no dbt execution needed.
+        dbt sources aren't standalone Dagster assets by default — they're upstream
+        deps. This creates explicit AssetSpec objects for sources that have freshness
+        config, with FreshnessPolicy attached. Dagster+ passively evaluates these.
         """
-        # Build lookup: source asset key → freshness minutes
-        freshness_by_source: dict[str, int] = {}
+        source_specs: list[dg.AssetSpec] = []
+
         for source_id, source_info in manifest.get("sources", {}).items():
             freshness = source_info.get("freshness", {})
             if not freshness:
                 continue
 
-            # Use warn_after as the policy (more conservative than error_after)
             warn_after = freshness.get("warn_after")
             error_after = freshness.get("error_after")
-
             threshold = warn_after or error_after
             if not threshold:
                 continue
@@ -353,28 +349,29 @@ class DbtMeshComponent(DbtProjectComponent):
                 continue
 
             asset_key = self.translator.get_asset_key(source_info)
-            freshness_by_source[str(asset_key)] = minutes
+            source_name = source_info.get("source_name", "")
+            table_name = source_info.get("name", "")
 
-        if not freshness_by_source:
-            return assets
+            from datetime import timedelta
 
-        def _apply_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
-            minutes = freshness_by_source.get(str(spec.key))
-            if minutes:
-                return spec.replace_attributes(
-                    freshness_policy=dg.FreshnessPolicy(maximum_lag_minutes=minutes),
+            source_specs.append(
+                dg.AssetSpec(
+                    key=asset_key,
+                    group_name="sources",
+                    description=source_info.get(
+                        "description", f"dbt source: {source_name}.{table_name}"
+                    ),
+                    metadata={
+                        "dbt/source_name": source_name,
+                        "dbt/table_name": table_name,
+                        "dbt/freshness_warn_minutes": minutes,
+                    },
+                    freshness_policy=dg.FreshnessPolicy.time_window(
+                        fail_window=timedelta(minutes=minutes),
+                    ),
                 )
-            return spec
+            )
 
-        # Apply policies to both standalone AssetSpecs and specs inside AssetsDefinitions
-        updated: list[Any] = []
-        for asset in assets:
-            if isinstance(asset, dg.AssetSpec):
-                asset = _apply_freshness(asset)
-            elif isinstance(asset, dg.AssetsDefinition):
-                asset = asset.map_asset_specs(_apply_freshness)
-            updated.append(asset)
-
-        return updated
+        return source_specs
 
     # Group resolution and partition definitions are handled by _MeshTranslator

@@ -4,4 +4,4 @@ select
     product_name,
     category,
     cast(unit_price as decimal(10,2)) as unit_price
-from {{ ref('raw_products') }}
+from {{ source('raw_data', 'raw_products') }}

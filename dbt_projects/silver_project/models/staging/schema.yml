@@ -7,16 +7,24 @@ groups:
 
 sources:
   - name: raw_data
-    description: "Raw data sources"
+    description: "Raw data loaded by upstream ingestion"
+    schema: silver
     freshness:
       warn_after: {count: 12, period: hour}
       error_after: {count: 24, period: hour}
+    loaded_at_field: _loaded_at
     tables:
       - name: raw_customers
+        identifier: raw_customers
       - name: raw_orders
+        identifier: raw_orders
         freshness:
           warn_after: {count: 6, period: hour}
           error_after: {count: 12, period: hour}
+      - name: raw_products
+        identifier: raw_products
+      - name: raw_order_items
+        identifier: raw_order_items
 
 models:
   - name: stg_customers

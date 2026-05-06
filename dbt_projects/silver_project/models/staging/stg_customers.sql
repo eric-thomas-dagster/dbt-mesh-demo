@@ -5,4 +5,4 @@ select
     last_name,
     email,
     cast(created_at as date) as created_at
-from {{ ref('raw_customers') }}
+from {{ source('raw_data', 'raw_customers') }}
