@@ -390,33 +390,9 @@ class DbtMeshComponent(DbtProjectComponent):
             updated_assets.append(asset)
         assets = updated_assets
 
-        # Create source assets for sources NOT already in the graph
+        # No standalone source assets — freshness is applied to existing
+        # seed/model assets above via map_asset_specs
         source_assets: list[dg.AssetSpec] = []
-        for source_id, source_info in manifest.get("sources", {}).items():
-            table_name = source_info.get("identifier") or source_info.get("name", "")
-            minutes = source_freshness.get(table_name)
-            if not minutes:
-                continue
-
-            asset_key = self.translator.get_asset_key(source_info)
-            # Skip if an asset with this key already exists (e.g. from seeds)
-            if str(asset_key) in existing_keys:
-                continue
-            # Also check by table name
-            if any(table_name == k.split("'")[-2] if "'" in k else "" for k in existing_keys):
-                continue
-
-            source_assets.append(
-                dg.AssetSpec(
-                    key=asset_key,
-                    group_name="sources",
-                    description=f"dbt source: {source_info.get('source_name', '')}.{table_name}",
-                    metadata={"dbt/freshness_warn_minutes": minutes},
-                    freshness_policy=dg.FreshnessPolicy.time_window(
-                        fail_window=timedelta(minutes=minutes),
-                    ),
-                )
-            )
 
         # Apply model-level freshness (dbt 1.10+) — no inheritance
         model_freshness: dict[str, int] = {}
