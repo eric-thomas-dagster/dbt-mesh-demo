@@ -207,10 +207,10 @@ class DbtMeshComponent(DbtProjectComponent):
         if self.enable_exposures:
             additional_assets.extend(self._create_exposure_assets(manifest))
 
-        # Source freshness policies — create explicit source assets with FreshnessPolicy
+        # Source/model freshness policies
         updated_assets = list(base_defs.assets or [])
         if self.enable_source_freshness_policies:
-            additional_assets.extend(self._create_source_freshness_assets(manifest))
+            updated_assets = self._apply_source_freshness_policies(updated_assets, manifest)
 
         if additional_assets:
             return dg.Definitions(
@@ -315,63 +315,101 @@ class DbtMeshComponent(DbtProjectComponent):
 
         return exposure_specs
 
-    def _create_source_freshness_assets(
-        self, manifest: Mapping[str, Any]
-    ) -> list[dg.AssetSpec]:
-        """Create explicit source assets with FreshnessPolicy from dbt freshness config.
+    def _apply_source_freshness_policies(
+        self,
+        assets: list[Any],
+        manifest: Mapping[str, Any],
+    ) -> list[Any]:
+        """Apply FreshnessPolicy to assets that correspond to dbt sources with freshness config.
 
-        dbt sources aren't standalone Dagster assets by default — they're upstream
-        deps. This creates explicit AssetSpec objects for sources that have freshness
-        config, with FreshnessPolicy attached. Dagster+ passively evaluates these.
+        Reads warn_after/error_after from dbt source definitions, finds the
+        matching asset keys (by looking at deps in the asset graph), and applies
+        FreshnessPolicy. Works on both standalone AssetSpecs and specs inside
+        AssetsDefinitions.
+
+        Also supports model-level freshness (dbt 1.10+) from config.freshness.
         """
-        source_specs: list[dg.AssetSpec] = []
+        from datetime import timedelta
 
-        for source_id, source_info in manifest.get("sources", {}).items():
-            freshness = source_info.get("freshness", {})
-            if not freshness:
-                continue
-
-            warn_after = freshness.get("warn_after")
-            error_after = freshness.get("error_after")
+        def _freshness_minutes(freshness_config: Mapping[str, Any]) -> int | None:
+            warn_after = freshness_config.get("warn_after")
+            error_after = freshness_config.get("error_after")
             threshold = warn_after or error_after
             if not threshold:
-                continue
-
+                return None
             count = threshold.get("count", 0)
             period = threshold.get("period", "hour")
             if period == "minute":
-                minutes = count
+                return count
             elif period == "hour":
-                minutes = count * 60
+                return count * 60
             elif period == "day":
-                minutes = count * 60 * 24
-            else:
+                return count * 60 * 24
+            return None
+
+        # Build lookup: asset key → freshness minutes
+        freshness_by_key: dict[str, int] = {}
+
+        # Source freshness — index by both the translator key AND the table name
+        # so we match regardless of how the dep key is structured
+        for source_id, source_info in manifest.get("sources", {}).items():
+            freshness = source_info.get("freshness", {})
+            minutes = _freshness_minutes(freshness)
+            if minutes:
+                asset_key = self.translator.get_asset_key(source_info)
+                freshness_by_key[str(asset_key)] = minutes
+                # Also index by just the table name for dep matching
+                table_name = source_info.get("identifier") or source_info.get("name", "")
+                if table_name:
+                    freshness_by_key[table_name] = minutes
+
+        # Model freshness (dbt 1.10+)
+        for node_id, node_info in manifest.get("nodes", {}).items():
+            freshness = node_info.get("config", {}).get("freshness") or {}
+            if not freshness:
                 continue
+            minutes = _freshness_minutes(freshness)
+            if minutes:
+                asset_key = self.translator.get_asset_key(node_info)
+                freshness_by_key[str(asset_key)] = minutes
 
-            asset_key = self.translator.get_asset_key(source_info)
-            source_name = source_info.get("source_name", "")
-            table_name = source_info.get("name", "")
+        if not freshness_by_key:
+            return assets
 
-            from datetime import timedelta
-
-            source_specs.append(
-                dg.AssetSpec(
-                    key=asset_key,
-                    group_name="sources",
-                    description=source_info.get(
-                        "description", f"dbt source: {source_name}.{table_name}"
-                    ),
-                    metadata={
-                        "dbt/source_name": source_name,
-                        "dbt/table_name": table_name,
-                        "dbt/freshness_warn_minutes": minutes,
-                    },
+        def _apply_freshness(spec: dg.AssetSpec) -> dg.AssetSpec:
+            # Direct match by full key or last segment
+            for key_str in [str(spec.key), spec.key.path[-1] if spec.key.path else ""]:
+                minutes = freshness_by_key.get(key_str)
+                if minutes:
+                    return spec.replace_attributes(
+                        freshness_policy=dg.FreshnessPolicy.time_window(
+                            fail_window=timedelta(minutes=minutes),
+                        ),
+                    )
+            # Check deps — if this asset depends on a source with freshness,
+            # apply the tightest (minimum) freshness from its source deps
+            dep_minutes: list[int] = []
+            for dep in spec.deps:
+                for key_str in [str(dep.asset_key), dep.asset_key.path[-1] if dep.asset_key.path else ""]:
+                    m = freshness_by_key.get(key_str)
+                    if m:
+                        dep_minutes.append(m)
+            if dep_minutes:
+                return spec.replace_attributes(
                     freshness_policy=dg.FreshnessPolicy.time_window(
-                        fail_window=timedelta(minutes=minutes),
+                        fail_window=timedelta(minutes=min(dep_minutes)),
                     ),
                 )
-            )
+            return spec
 
-        return source_specs
+        updated: list[Any] = []
+        for asset in assets:
+            if isinstance(asset, dg.AssetSpec):
+                asset = _apply_freshness(asset)
+            elif isinstance(asset, dg.AssetsDefinition):
+                asset = asset.map_asset_specs(_apply_freshness)
+            updated.append(asset)
+
+        return updated
 
     # Group resolution and partition definitions are handled by _MeshTranslator
